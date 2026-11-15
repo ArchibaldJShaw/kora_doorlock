@@ -62,11 +62,11 @@ local function triggerHooks(event, payload)
     for hookId, definition in pairs(hooks) do
         if definition.event == event and (not definition.nameFilter or payload.door.label:match(definition.nameFilter)) then
             if definition.print then
-                print(('[kora_doorlock] triggering %s hook %d from %s'):format(event, hookId, definition.resource))
+                Kora.logging.info('hooks.triggering', 'Triggering a door hook', { hookEvent = event, hookId = hookId, hookResource = tostring(definition.resource) })
             end
             local ok, result = pcall(definition.callback, payload)
             if not ok then
-                print(('^3[kora_doorlock]^7 %s hook %d failed: %s'):format(event, hookId, tostring(result)))
+                Kora.logging.warn('hooks.callback_failed', 'A door hook callback failed', { hookEvent = event, hookId = hookId, error = tostring(result) })
             elseif result ~= nil then
                 response = result == true
             end
@@ -159,9 +159,13 @@ local function hasAccess(source, id, door, lockpick, skipLinked)
         end
         authorised = DoorlockAccess.decide(facts, Config.UnrestrictedDoorsOpenToAll)
         if Config.Debug then
-            print(('[kora_doorlock] access %s for player %s on %s: ace=%s admin=%s character=%s group=%s item=%s restricted=%s'):format(
-                authorised and 'granted' or 'refused', tostring(source), tostring(id), tostring(facts.ace), tostring(facts.admin),
-                tostring(facts.character), tostring(facts.group), tostring(facts.item == true), tostring(facts.restricted)))
+            if Kora.logging.isEnabled('debug') then
+                Kora.logging.debug('access.decided', 'Door access decided', {
+                    decision = authorised and 'granted' or 'refused', playerId = source, doorId = tostring(id),
+                    ace = facts.ace, admin = facts.admin, character = facts.character, group = facts.group,
+                    item = facts.item == true, restricted = facts.restricted,
+                })
+            end
         end
     end
 
@@ -259,7 +263,7 @@ local function persistDoor(id, door, releasePolicy)
         'INSERT INTO `kora_doorlock_doors` (`id`, `definition`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `definition` = VALUES(`definition`)',
         { id, encodeDefinition(door) })
     if not saved then
-        print(('^1[kora_doorlock]^7 saving door %s failed: %s'):format(tostring(id), tostring(err or 'kora_sql returned nothing')))
+        Kora.logging.error('door.save_failed', 'Saving a door failed', { doorId = tostring(id), error = tostring(err or 'kora_sql returned nothing') })
         return false, err or translate('err_db_door')
     end
     return true
@@ -426,7 +430,7 @@ local function saveManagedDoor(source, id, raw, creating, sourceDoorId)
 end
 
 local function logRefusal(source, action, err)
-    print(('^3[kora_doorlock]^7 %s refused for player %s: %s'):format(action, tostring(source), tostring(err)))
+    Kora.logging.warn('door.action_refused', 'A door action was refused', { action = tostring(action), playerId = source, reason = tostring(err) })
     return nil, err
 end
 
@@ -467,7 +471,7 @@ local function persistCategory(category)
         'INSERT INTO `kora_doorlock_categories` (`id`, `label`, `defaults`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `label` = VALUES(`label`), `defaults` = VALUES(`defaults`)',
         { category.id, category.label, json.encode(category.defaults) })
     if saved == nil then
-        print(('^1[kora_doorlock]^7 saving category %s failed: %s'):format(category.id, tostring(err or 'kora_sql returned nothing')))
+        Kora.logging.error('category.save_failed', 'Saving a door category failed', { categoryId = tostring(category.id), error = tostring(err or 'kora_sql returned nothing') })
         return false, err or translate('err_db_category')
     end
     return true
@@ -906,22 +910,28 @@ end
 CreateThread(function()
     if not Kora.sql.ready(60000) then
         initializationComplete = true
-        return print('^1[kora_doorlock]^7 kora_sql was not ready; persistent door management is disabled.')
+        Kora.logging.error('schema.sql_not_ready', 'kora_sql was not ready; persistent door management is disabled')
+        return
     end
 
     local reports, schemaErr = Kora.sql.ensureTables(DoorlockTables)
     if schemaErr then
         initializationComplete = true
-        return print(('^1[kora_doorlock]^7 database schema failed; persistent door management is disabled: %s'):format(tostring(schemaErr)))
+        Kora.logging.error('schema.setup_failed', 'Database schema failed; persistent door management is disabled', { error = tostring(schemaErr) })
+        return
     end
     for _, report in ipairs(reports or {}) do
         for _, warning in ipairs(report.warnings or {}) do
-            print(('^3[kora_doorlock]^7 %s: %s'):format(tostring(report.table), tostring(warning)))
+            Kora.logging.warn('schema.table_warning', 'Schema reported a warning for a table', { table = tostring(report.table), warning = tostring(warning) })
         end
     end
 
     local rows, queryErr = Kora.sql.query('SELECT `id`, `definition` FROM `kora_doorlock_doors`')
-    if queryErr then initializationComplete = true; return print(('^1[kora_doorlock]^7 could not load doors: %s'):format(queryErr)) end
+    if queryErr then
+        initializationComplete = true
+        Kora.logging.error('door.load_failed', 'Could not load doors', { error = tostring(queryErr) })
+        return
+    end
     for _, row in ipairs(rows) do
         local ok, raw = pcall(json.decode, row.definition)
         if ok and type(raw) == 'table' and type(row.id) == 'string' then
@@ -930,14 +940,18 @@ CreateThread(function()
             else
                 local door, err = DoorlockSchema.normalize(raw, Config.InteractionDistance)
                 if door then doors[row.id], states[row.id] = door, door.policyOwner and true or door.locked
-                else print(('^3[kora_doorlock]^7 skipped invalid stored door %s: %s'):format(row.id, err)) end
+                else Kora.logging.warn('door.stored_invalid', 'Skipped an invalid stored door', { doorId = tostring(row.id), error = tostring(err) }) end
             end
         else
-            print(('^3[kora_doorlock]^7 skipped malformed stored door %s'):format(tostring(row.id)))
+            Kora.logging.warn('door.stored_malformed', 'Skipped a malformed stored door', { doorId = tostring(row.id) })
         end
     end
     local links, linksErr = Kora.sql.query('SELECT `door_id`, `linked_door_id` FROM `kora_doorlock_links`')
-    if linksErr then initializationComplete = true; return print(('^1[kora_doorlock]^7 could not load door links: %s'):format(linksErr)) end
+    if linksErr then
+        initializationComplete = true
+        Kora.logging.error('door.links_load_failed', 'Could not load door links', { error = tostring(linksErr) })
+        return
+    end
     local candidates = {}
     for _, row in ipairs(links) do
         if type(row.door_id) == 'string' and type(row.linked_door_id) == 'string' and row.door_id ~= row.linked_door_id
@@ -947,7 +961,7 @@ CreateThread(function()
 
     local categoryRows, categoryErr = Kora.sql.query('SELECT `id`, `label`, `defaults` FROM `kora_doorlock_categories`')
     if categoryErr then
-        print(('^3[kora_doorlock]^7 could not load door categories: %s'):format(tostring(categoryErr)))
+        Kora.logging.warn('category.load_failed', 'Could not load door categories', { error = tostring(categoryErr) })
     else
         for _, row in ipairs(categoryRows) do
             local ok, raw = pcall(json.decode, row.defaults)
@@ -955,7 +969,7 @@ CreateThread(function()
             if type(row.id) == 'string' and type(row.label) == 'string' and defaults then
                 categories[row.id] = { id = row.id, label = row.label, defaults = defaults }
             else
-                print(('^3[kora_doorlock]^7 skipped malformed stored category %s'):format(tostring(row.id)))
+                Kora.logging.warn('category.stored_malformed', 'Skipped a malformed stored category', { categoryId = tostring(row.id) })
             end
         end
         categoriesReady = true

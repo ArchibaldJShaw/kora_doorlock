@@ -19,7 +19,16 @@ local function setup(stored, linked, rateLimit)
     env.exports = setmetatable({ kora_core = { getPlayer = function() return { citizenid = 'CID1' } end } }, {
         __call = function(_, name, fn) f.exports[name] = fn end,
     })
+    f.logCalls = {}
+    local logging = { isEnabled = function() return true end }
+    for _, level in ipairs({ 'trace', 'debug', 'info', 'warn', 'error', 'fatal' }) do
+        logging[level] = function(event, message, fields)
+            f.logCalls[#f.logCalls + 1] = { level = level, event = event, message = message, fields = fields }
+            return true
+        end
+    end
     env.Kora = {
+        logging = logging,
         lang = function(key) return key end,
         permissions = { hasPermission = function() return false end },
         util = { deepClone = function(value)
@@ -108,6 +117,14 @@ H.test('failed policy persistence does not install an unconfirmed policy', funct
     f.failSave = true
     H.assertEqual(f.exports.RegisterDoorPolicy('test', function() return false end), false)
     f.toggle(); H.assertEqual(f.exports.getDoorState('test'), true)
+    local saved
+    for _, call in ipairs(f.logCalls) do if call.event == 'door.save_failed' then saved = call end end
+    H.assertTrue(saved ~= nil, 'the failed save is logged')
+    H.assertEqual(saved.level, 'error')
+    H.assertEqual(type(saved.fields), 'table')
+    H.assertEqual(saved.fields.doorId, 'test')
+    H.assertTrue(type(saved.fields.error) == 'string' and saved.fields.error ~= '', 'fields carry the error')
+    H.assertTrue(not saved.message:find('%[kora_doorlock%]'), 'no resource prefix in the message')
 end)
 
 H.test('an unrestricted linked door cannot bypass its protected partner', function()

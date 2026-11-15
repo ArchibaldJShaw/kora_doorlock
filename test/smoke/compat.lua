@@ -87,4 +87,18 @@ harness.test('removed doors disappear from the compat views', function()
     harness.assertEqual(provided.GetDoorList().back, nil)
 end)
 
+harness.test('a rejected client door definition is logged as a warning with the cause in fields', function()
+    local calls = {}
+    local previous = rawget(Kora, 'logging')
+    Kora.logging = { warn = function(event, message, fields) calls[#calls + 1] = { event = event, message = message, fields = fields }; return true end }
+    pushes['kora_doorlock:client:doorDefinitionUpdated']('broken', 'not a table', true)
+    Kora.logging = previous
+    harness.assertEqual(#calls, 1, 'one warn call')
+    harness.assertEqual(calls[1].event, 'door.client_rejected')
+    harness.assertEqual(type(calls[1].fields), 'table')
+    harness.assertEqual(calls[1].fields.doorId, 'broken')
+    harness.assertTrue(type(calls[1].fields.error) == 'string' and calls[1].fields.error ~= '', 'fields carry the error')
+    harness.assertTrue(not calls[1].message:find('%[kora_doorlock%]'), 'no resource prefix in the message')
+end)
+
 harness.report('doorlock compat')
