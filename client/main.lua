@@ -238,7 +238,10 @@ end
 
 local function setupDoor(id, raw, locked)
     local door, err = DoorlockSchema.normalize(raw, Config.InteractionDistance)
-    if not door then return print(('^3[kora_doorlock]^7 rejected client door %s: %s'):format(tostring(id), err)) end
+    if not door then
+        Kora.logging.warn('door.client_rejected', 'Rejected a client door definition', { doorId = tostring(id), error = tostring(err) })
+        return
+    end
     -- Saving details re-sends the definition. Keep the door-system entry when the doors did not move,
     -- instead of removing and re-adding the same hash in one frame.
     local keepSystem = doors[id] ~= nil and sameLeaves(doors[id], door)
